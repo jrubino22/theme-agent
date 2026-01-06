@@ -1,0 +1,13 @@
+services:
+  theme-agent:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    volumes:
+      - ../tasks:/app/tasks:ro
+      - ../runs:/app/runs
+      - ${THEME_DIR}:/work/theme
+      - ../baselines:/app/baselines
+    working_dir: /app
+    environment:
+      - PYTHONUNBUFFERED=1

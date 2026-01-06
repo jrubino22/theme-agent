@@ -1,0 +1,12 @@
+{
+    "intent": "Test insert",
+    "ops": [
+      {
+        "type": "insert_after",
+        "path": "layout/theme.liquid",
+        "anchor": "<head>",
+        "content": "\n<!-- plan-test insert -->\n",
+        "reason": "prove pipeline"
+      }
+    ]
+  }
