@@ -1,0 +1,7 @@
+{
+    "mustHave": [
+      { "selector": "main", "minCount": 1 }
+    ],
+    "textContains": [],
+    "notPresent": []
+  }
