@@ -9,7 +9,7 @@ from agent.tools.cmd import run_allowed
 
 def _allowed_cmd_prefixes() -> List[List[str]]:
     return [
-        ["shopify", "login"],
+        ["shopify", "auth", "login"],
         ["shopify", "theme", "dev"],
         ["shopify", "theme", "check"],
         ["shopify", "theme", "list"],
@@ -31,7 +31,7 @@ def shopify_login(*, theme_root: Path, timeout_sec: int = 600) -> None:
     """
     Interactive login (browser on host). You still need SHOPIFY_FLAG_STORE for theme dev later.
     """
-    cmd = ["shopify", "login"]
+    cmd = ["shopify", "auth", "login"]
     res = run_allowed(cmd, cwd=theme_root, allowed_prefixes=_allowed_cmd_prefixes(), timeout_sec=timeout_sec)
     if res.stdout:
         print(res.stdout)

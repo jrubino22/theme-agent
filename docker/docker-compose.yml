@@ -1,32 +1,36 @@
 services:
   theme-agent:
+    stdin_open: true
+    tty: true
     build:
       context: ..
       dockerfile: docker/Dockerfile
+
+    env_file:
+      - .env
+
     volumes:
       - ../tasks:/app/tasks
       - ../runs:/app/runs
+      - ../baselines:/app/baselines
       - ${THEME_DIR}:/work/theme
 
-      # Persist Shopify CLI auth between runs (interactive login flow)
-      - ../.shopify_config:/home/pwuser/.config/shopify
-      - ../.shopify_cache:/home/pwuser/.cache/shopify
+      # Persist CLI config/cache in writable locations (owned by pwuser)
+      - shopify_config:/app/.config
+      - shopify_cache:/app/.cache
+
     ports:
-      - "3456:3456"   # OAuth callback during login
-      - "9292:9292"   # shopify theme dev preview
+      - "3456:3456"
+      - "9292:9292"
+
     environment:
-      # LLM
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - OPENAI_BASE_URL=${OPENAI_BASE_URL:-https://api.openai.com/v1}
-      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4.1-mini}
-      - OPENAI_TEMPERATURE=${OPENAI_TEMPERATURE:-0.2}
+      - PYTHONUNBUFFERED=1
 
-      # Shopify CLI theme targeting (recommended)
-      - SHOPIFY_FLAG_STORE=${SHOPIFY_FLAG_STORE}
-      - SHOPIFY_FLAG_THEME_ID=${SHOPIFY_FLAG_THEME_ID:-}
-      - SHOPIFY_CLI_THEME_TOKEN=${SHOPIFY_CLI_THEME_TOKEN:-}
-      - SHOPIFY_FLAG_STORE_PASSWORD=${SHOPIFY_FLAG_STORE_PASSWORD:-}
+      # Force Node/Shopify CLI to use our writable dirs
+      - XDG_CONFIG_HOME=/app/.config
+      - XDG_CACHE_HOME=/app/.cache
+      - HOME=/app
 
-      # MCP (optional)
-      - FIGMA_MCP_CMD=${FIGMA_MCP_CMD}
-      - SHOPIFY_MCP_CMD=${SHOPIFY_MCP_CMD}
+volumes:
+  shopify_config:
+  shopify_cache:

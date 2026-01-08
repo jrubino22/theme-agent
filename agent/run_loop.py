@@ -49,7 +49,6 @@ def _allowed_cmd_prefixes() -> List[List[str]]:
     return [
         ["shopify", "theme", "check"],
         ["shopify", "theme", "dev"],
-        ["shopify", "whoami"],
         ["shopify", "theme", "info"],
         ["shopify", "theme", "list"],
         ["rg"],

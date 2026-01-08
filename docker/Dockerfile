@@ -31,6 +31,9 @@ RUN printf '#!/bin/sh\necho "Open this URL on your host browser: $*"\nexit 0\n' 
 
 ENV PYTHONPATH=/app
 
+RUN mkdir -p /app/.config /app/.cache /app/runs \
+ && chown -R pwuser:pwuser /app
+
 # Use the Playwright image's non-root user for sane volume permissions on macOS.
 USER pwuser
 
