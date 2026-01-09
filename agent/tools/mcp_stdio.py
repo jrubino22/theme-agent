@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import threading
 from dataclasses import dataclass
@@ -9,6 +10,10 @@ from typing import Any, Dict, List, Optional
 
 class MCPError(RuntimeError):
     pass
+
+
+# Default to current MCP protocol version, override via env if needed
+DEFAULT_MCP_PROTOCOL_VERSION = os.environ.get("MCP_PROTOCOL_VERSION", "2025-11-25")
 
 
 @dataclass
@@ -36,8 +41,20 @@ class MCPClient:
         if not proc.stdin or not proc.stdout:
             raise MCPError("Failed to start MCP process with stdio.")
         client = MCPClient(name=name, proc=proc)
-        # Initialize session (best-effort)
-        client._request("initialize", {"clientInfo": {"name": "theme-agent", "version": "0.2.0"}})
+
+        # MCP lifecycle handshake:
+        # 1) initialize request with protocolVersion + capabilities + clientInfo
+        # 2) notifications/initialized
+        client._request(
+            "initialize",
+            {
+                "protocolVersion": DEFAULT_MCP_PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": {"name": "theme-agent", "version": "0.2.0"},
+            },
+        )
+        client._notify("notifications/initialized")
+
         return client
 
     def close(self) -> None:
@@ -54,6 +71,23 @@ class MCPClient:
     def call_tool(self, tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
         resp = self._request("tools/call", {"name": tool_name, "arguments": arguments})
         return resp
+
+    def _notify(self, method: str, params: Optional[Dict[str, Any]] = None) -> None:
+        """
+        Send a JSON-RPC notification (no id; no response expected).
+        """
+        msg: Dict[str, Any] = {"jsonrpc": "2.0", "method": method}
+        if params is not None:
+            msg["params"] = params
+
+        if not self.proc.stdin:
+            raise MCPError(f"{self.name} MCP process stdin not available.")
+
+        try:
+            self.proc.stdin.write(json.dumps(msg) + "\n")
+            self.proc.stdin.flush()
+        except Exception as e:
+            raise MCPError(f"{self.name} MCP notify failed: {type(e).__name__}: {e}")
 
     def _request(self, method: str, params: Dict[str, Any]) -> Dict[str, Any]:
         with self._lock:

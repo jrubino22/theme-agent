@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import httpx
+
+
+class LLMError(RuntimeError):
+    pass
 
 
 @dataclass
@@ -14,35 +19,13 @@ class ToolSpec:
     schema: Dict[str, Any]
 
 
-class LLMError(RuntimeError):
-    pass
-
-
-class OpenAICompatChat:
+def _to_openai_tools_payload(tools: List[ToolSpec]) -> List[Dict[str, Any]]:
     """
-    Minimal OpenAI-compatible Chat Completions client with tool-calling support.
-
-    Uses: POST {base_url}/chat/completions
-    Env wiring is in agent/cli.py (OPENAI_BASE_URL, OPENAI_API_KEY, OPENAI_MODEL).
+    Convert ToolSpec -> OpenAI-compatible tools payload.
     """
-
-    def __init__(self, *, base_url: str, api_key: Optional[str], model: str, temperature: float = 0.2) -> None:
-        if not api_key:
-            raise SystemExit("OPENAI_API_KEY is required.")
-        self.base_url = base_url.rstrip("/")
-        self.api_key = api_key
-        self.model = model
-        self.temperature = temperature
-
-    def run_with_tools(
-        self,
-        *,
-        messages: List[Dict[str, Any]],
-        tools: List[ToolSpec],
-        tool_handler: Callable[[str, Dict[str, Any]], Dict[str, Any]],
-        max_tool_round_trips: int = 24,
-    ) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
-        tool_payload = [
+    out: List[Dict[str, Any]] = []
+    for t in tools:
+        out.append(
             {
                 "type": "function",
                 "function": {
@@ -51,81 +34,130 @@ class OpenAICompatChat:
                     "parameters": t.schema,
                 },
             }
-            for t in tools
-        ]
+        )
+    return out
 
+
+class OpenAICompatChat:
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        api_key: str,
+        model: str,
+        temperature: float = 0.2,
+        timeout_sec: Optional[float] = None,
+        max_retries: int = 1,
+    ) -> None:
+        self.base_url = base_url.rstrip("/")
+        self.api_key = api_key
+        self.model = model
+        self.temperature = temperature
+
+        # Default to something sane for tool-using agents.
+        # You can override with env LLM_TIMEOUT_SEC.
+        if timeout_sec is None:
+            timeout_sec = float(os.environ.get("LLM_TIMEOUT_SEC", "180"))
+
+        self.timeout = httpx.Timeout(
+            connect=10.0,
+            read=timeout_sec,
+            write=30.0,
+            pool=timeout_sec,
+        )
+        self.max_retries = max_retries
+
+    def run_with_tools(
+        self,
+        *,
+        messages: List[Dict[str, Any]],
+        tools: List[ToolSpec],
+        tool_handler: Callable[[str, Dict[str, Any]], Dict[str, Any]],
+        max_tool_round_trips: int = 20,
+    ) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+        tool_payload = _to_openai_tools_payload(tools)
+
+        # One loop where the model can call tools repeatedly.
         for _ in range(max_tool_round_trips):
             resp = self._chat(messages=messages, tools=tool_payload)
-            msg = resp["choices"][0]["message"]
 
-            # Tool calls?
+            # OpenAI compat: choices[0].message
+            choice = (resp.get("choices") or [{}])[0]
+            msg = choice.get("message") or {}
+
+            # If the model asked to call tools:
             tool_calls = msg.get("tool_calls") or []
             if tool_calls:
-                messages.append(
-                    {
-                        "role": "assistant",
-                        "content": msg.get("content") or "",
-                        "tool_calls": tool_calls,
-                    }
-                )
-                for tc in tool_calls:
-                    fn = tc["function"]["name"]
-                    raw_args = tc["function"].get("arguments") or "{}"
+                # Add assistant message with tool_calls
+                messages.append({"role": "assistant", "content": msg.get("content") or "", "tool_calls": tool_calls})
+
+                # Execute each tool call and add tool results
+                for call in tool_calls:
+                    fn = (call.get("function") or {})
+                    name = fn.get("name")
+                    raw_args = fn.get("arguments") or "{}"
                     try:
                         args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
-                    except json.JSONDecodeError:
-                        args = {"_raw": raw_args}
+                    except Exception:
+                        args = {}
 
-                    result = tool_handler(fn, args)
+                    if not name:
+                        result = {"ok": False, "error": "Missing tool name."}
+                    else:
+                        result = tool_handler(name, args if isinstance(args, dict) else {})
+
                     messages.append(
                         {
                             "role": "tool",
-                            "tool_call_id": tc["id"],
+                            "tool_call_id": call.get("id"),
                             "content": json.dumps(result),
                         }
                     )
+
                 continue
 
-            # No tool calls -> final content should be JSON decision
-            content = (msg.get("content") or "").strip()
+            # Otherwise, we expect model to output JSON in content
+            content = msg.get("content") or ""
+            try:
+                decision = json.loads(content)
+            except Exception:
+                # Keep minimal: surface raw content for debugging
+                decision = {"status": "continue", "plan": "Model returned non-JSON.", "edits": content[:2000]}
             messages.append({"role": "assistant", "content": content})
-
-            decision = _safe_json_parse(content)
-            if not isinstance(decision, dict) or "status" not in decision:
-                # If model didn't follow the contract, coerce into a continue
-                return {"status": "continue", "notes": content[:2000]}, messages
-
             return decision, messages
 
-        return {"status": "error", "error": "Exceeded max tool round-trips without producing a decision."}, messages
+        raise LLMError(f"Exceeded max_tool_round_trips={max_tool_round_trips}")
 
-    def _chat(self, *, messages: List[Dict[str, Any]], tools: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def _chat(self, *, messages: List[Dict[str, Any]], tools: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
         url = f"{self.base_url}/chat/completions"
-        headers = {"Authorization": f"Bearer {self.api_key}"}
-        payload = {
+        headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
+
+        payload: Dict[str, Any] = {
             "model": self.model,
-            "temperature": self.temperature,
             "messages": messages,
-            "tools": tools,
-            "tool_choice": "auto",
+            "temperature": self.temperature,
         }
-        with httpx.Client(timeout=90) as client:
-            r = client.post(url, headers=headers, json=payload)
-            if r.status_code >= 400:
-                raise LLMError(f"LLM HTTP {r.status_code}: {r.text[:2000]}")
-            return r.json()
+        if tools is not None:
+            payload["tools"] = tools
 
-
-def _safe_json_parse(s: str) -> Any:
-    try:
-        return json.loads(s)
-    except Exception:
-        # try to salvage JSON blob inside text
-        start = s.find("{")
-        end = s.rfind("}")
-        if start != -1 and end != -1 and end > start:
+        last_err: Optional[Exception] = None
+        for attempt in range(self.max_retries + 1):
             try:
-                return json.loads(s[start : end + 1])
-            except Exception:
-                return None
-        return None
+                with httpx.Client(timeout=self.timeout) as client:
+                    r = client.post(url, headers=headers, json=payload)
+                if r.status_code >= 400:
+                    raise LLMError(f"LLM HTTP {r.status_code}: {r.text[:2000]}")
+                return r.json()
+            except (httpx.ReadTimeout, httpx.ConnectTimeout) as e:
+                last_err = e
+                if attempt >= self.max_retries:
+                    raise
+                continue
+            except httpx.HTTPError as e:
+                last_err = e
+                if attempt >= self.max_retries:
+                    raise
+                continue
+
+        # Should never hit, but just in case
+        raise LLMError(f"LLM request failed: {type(last_err).__name__}: {last_err}")
