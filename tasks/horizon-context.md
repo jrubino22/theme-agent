@@ -291,3 +291,8 @@ Prefer theme blocks (/blocks) for reusable patterns; reserve section blocks for 
 Make blocks self-contained and layout-agnostic; parent sections own layout and spacing.
 
 Interactive blocks must use Horizon’s Component/event architecture, not inline JS.
+
+**Important** - For design/style changes, always first see if it's possible to simply update the configuration in json files. If it seems like it's not possible to achieve the desired style by updating json files, then we can move on to editing / creating liquid files. The goal should always be to keep the theme as native as possible. (we will certainly
+have to write plenty of custom code, so don't be afraid to write custom code after confirming it's necessary to do so).
+Make sure to fill in content via json files even for custom built components too. For example, if you build a new section
+for the product page, add it and some content to product.json and use Shopify MCP/CLI to ensure there are no JSON errors.

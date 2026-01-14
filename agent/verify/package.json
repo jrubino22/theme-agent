@@ -1,0 +1,8 @@
+{
+    "name": "theme-agent-verify",
+    "private": true,
+    "type": "commonjs",
+    "dependencies": {
+      "playwright": "^1.49.0"
+    }
+}

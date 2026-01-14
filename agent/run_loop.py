@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import inspect
 import json
 import time
@@ -22,6 +23,8 @@ from agent.tools.repo_recon import theme_structure_check
 from agent.tools.theme_check import run_theme_check
 from agent.tools.theme_dev_manager import ThemeDevError, ThemeDevProcess, start_theme_dev
 from agent.tools.theme_summary import summarize_theme
+from agent.tools.web_tools import duckduckgo_search, web_fetch, WebToolError
+
 
 console = Console()
 
@@ -95,12 +98,16 @@ def _build_system_prompt(
     routes: List[str],
     run_theme_check_enabled: bool,
     run_playwright_enabled: bool,
+    figma_file_key: Optional[str],
+    figma_node_id: Optional[str],
 ) -> str:
     routes_txt = ", ".join(routes) if routes else "(none)"
 
     return (
         "You are an autonomous agent that edits Shopify theme files in a git repo.\n"
         "You MUST follow these constraints:\n"
+        "- Only use web_search and web_fetch tools to get information from the web.\n"
+        "- Do not copy large web chunks verbatim, summarize and adapt.\n"
         "- Only edit theme files inside the repo (sections/snippets/templates/assets/config/locales).\n"
         "- Never add new content or image assets. Content lives in Shopify admin.\n"
         "- Keep changes minimal and surgical.\n"
@@ -114,6 +121,15 @@ def _build_system_prompt(
             + "\n\n"
             if horizon_context_md and horizon_context_md.strip()
             else ""
+        )
+        + (
+            "Figma scope:\n"
+            f"- file_key: {figma_file_key or '(not set)'}\n"
+            f"- primary_node_id: {figma_node_id or '(not set)'}\n"
+            "- Only inspect the primary node/frame unless you must look elsewhere.\n"
+            "- Do NOT fetch Figma URLs directly; use MCP tools only.\n"
+            "- If you need a different node, return status=needs_human and ask for the node-id.\n"
+            "\n"
         )
         + f"Local preview base_url: {base_url or '(not running)'}\n"
         + f"Routes to verify: {routes_txt}\n"
@@ -133,6 +149,7 @@ def _build_system_prompt(
         "- admin_steps: only if needs_human\n"
         "- verify: optional (call verify tool as needed)\n"
         "- horizon_ack: 2-5 bullets of Horizon rules you will follow (from horizon-context.md)\n"
+        "- tools_used: list of tools used in this iteration. If any tools didn't work as expected, please explain the issue\n"
     )
 
 
@@ -217,6 +234,30 @@ def _build_tool_specs() -> List[ToolSpec]:
                 "type": "object",
                 "properties": {"name": {"type": "string"}, "arguments": {"type": "object"}},
                 "required": ["name", "arguments"],
+            },
+        ),
+        ToolSpec(
+            name="web_search",
+            description="Search the public web (DuckDuckGo HTML). Returns top results with title/url/snippet.",
+            schema={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "max_results": {"type": "integer"},
+                },
+                "required": ["query"],
+            },
+        ),
+        ToolSpec(
+            name="web_fetch",
+            description="Fetch a URL and return cleaned page text (read-only).",
+            schema={
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string"},
+                    "max_chars": {"type": "integer"},
+                },
+                "required": ["url"],
             },
         ),
     ]
@@ -341,7 +382,18 @@ def run_agent_loop(
 
     def call_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
         try:
-            # Accept both underscore tool names (new) and dotted names (legacy)
+            if name == "web_search":
+                q = (args.get("query") or "").strip()
+                max_results = args.get("max_results", 8)
+                results = duckduckgo_search(q, max_results=max_results)
+                return {"ok": True, "results": results}
+
+            if name == "web_fetch":
+                url = (args.get("url") or "").strip()
+                max_chars = args.get("max_chars", 200000)
+                result = web_fetch(url, max_chars=max_chars)
+                return {"ok": True, "page": result}
+
             if name in ("theme_read_file", "theme.read_file"):
                 return {"ok": True, "content": fs.read_text(args["path"])}
 
@@ -430,10 +482,22 @@ def run_agent_loop(
 
             return _tool_error(f"Unknown tool: {name}")
 
-        except (ThemeScopeError, ArtifactScopeError, CommandNotAllowed) as e:
+        except (ThemeScopeError, ArtifactScopeError, CommandNotAllowed, WebToolError) as e:
             return _tool_error(f"{type(e).__name__}: {e}")
         except Exception as e:
             return _tool_error(f"{type(e).__name__}: {e}")
+
+    #figma scoping
+    figma_file_key = (os.environ.get("FIGMA_FILE_KEY") or "").strip()
+    figma_node_id = (os.environ.get("FIGMA_NODE_ID") or "").strip()
+
+    if figma_node_id and "-" in figma_node_id and ":" not in figma_node_id:
+        figma_node_id = figma_node_id.replace("-", ":")
+
+    if figma_file_key:
+        console.print(f" figma_file_key: {figma_file_key[:6]}…")
+    if figma_node_id:
+        console.print(f" figma_node_id: {figma_node_id}")
 
     system = _build_system_prompt(
         task_md=task_md,
@@ -445,6 +509,8 @@ def run_agent_loop(
         routes=routes,
         run_theme_check_enabled=run_theme_check,
         run_playwright_enabled=run_playwright,
+        figma_file_key=figma_file_key,
+        figma_node_id=figma_node_id,
     )
 
     messages: List[Dict[str, Any]] = [{"role": "system", "content": system}]
@@ -472,7 +538,12 @@ def run_agent_loop(
             if steps:
                 artifacts.write_text("admin_steps.md", steps)
             console.print(Panel.fit("Waiting for human to apply Shopify admin steps…", title="human"))
-            wait_for_continue(tasks_dir)
+            notes = wait_for_continue(tasks_dir)
+            if notes.strip():
+                messages.append({
+                    "role": "user",
+                    "content": "I completed the Shopify admin steps. Summary of what I did:\n\n" + notes.strip()
+                })
             continue
 
     # cleanup
@@ -515,16 +586,31 @@ def _run_verify(
     playwright_summary = ""
 
     if do_theme_check:
-        r = run_theme_check(theme_root)
-        theme_check_ok = r.ok
-        theme_check_summary = r.summary
-        _write_text(artifacts_dir / "theme_check.txt", r.raw_output)
+        tc = run_theme_check(
+            theme_root,
+            artifacts_dir=artifacts_dir,
+            allowed_cmds=allowed_cmds,
+            timeout_sec=min(cmd_timeout_sec, 180),
+        )
+        theme_check_ok = bool(tc.get("ok"))
+        theme_check_summary = str(tc.get("summary") or "")
 
     if do_playwright:
-        r = run_playwright_verify(base_url=base_url, routes=routes)
-        playwright_ok = r.ok
-        playwright_summary = r.summary
-        _write_text(artifacts_dir / "playwright.txt", r.raw_output)
+        if not base_url:
+            playwright_ok = False
+            playwright_summary = "skipped (base_url not set)"
+        else:
+            pw = run_playwright_verify(
+                theme_root=theme_root,
+                artifacts_dir=artifacts_dir,
+                allowed_cmds=allowed_cmds,
+                timeout_sec=cmd_timeout_sec,
+                base_url=base_url,
+                routes=routes,
+                asserts_path=None,
+            )
+            playwright_ok = bool(pw.get("ok"))
+            playwright_summary = str(pw.get("summary") or "")
 
     ok = theme_check_ok and playwright_ok
     return VerifyResult(
@@ -535,3 +621,4 @@ def _run_verify(
         playwright_summary=playwright_summary,
         artifacts_dir=artifacts_dir,
     )
+

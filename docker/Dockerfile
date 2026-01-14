@@ -19,6 +19,10 @@ COPY agent /app/agent
 COPY tasks /app/tasks
 RUN mkdir -p /app/runs
 
+COPY agent/verify/package.json /app/agent/verify/package.json
+RUN cd /app/agent/verify && npm install --omit=dev && npx playwright install --with-deps
+COPY agent/verify /app/agent/verify
+
 # Avoid CLI trying to open a browser inside the container.
 # It will print the URL; you open it on macOS.
 ENV BROWSER=echo

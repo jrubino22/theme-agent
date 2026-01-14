@@ -1,15 +1,20 @@
 SHELL := /bin/bash
 
-COMPOSE := docker compose -f docker/docker-compose.yml
+THEME_DIR = /Users/jrubino/Desktop/client-projects/enhanced/enhanced-horizon
+
+# Compose + service
+COMPOSE_FILE := docker/docker-compose.yml
+COMPOSE := THEME_DIR="$(THEME_DIR)" docker compose -f $(COMPOSE_FILE)
 SERVICE := theme-agent
 
-# Default flags you always type
-WORKDIR ?= /work/theme
 
-.PHONY: doctor login run run-nomcp theme-dev shell build rebuild logs down
+# Default flags you always type
+WORKDIR = /work/theme
+
+.PHONY: doctor login run run-nomcp theme-dev shell build rebuild logs down config
 
 doctor:
-	$(COMPOSE) run --rm $(SERVICE) doctor
+	$(COMPOSE) run --rm $(SERVICE) doctor --workdir $(WORKDIR)
 
 login:
 	$(COMPOSE) run -it --service-ports --entrypoint shopify $(SERVICE) auth login
@@ -38,3 +43,6 @@ logs:
 
 down:
 	$(COMPOSE) down
+
+config:
+	$(COMPOSE) config | sed -n '/volumes:/,/ports:/p'

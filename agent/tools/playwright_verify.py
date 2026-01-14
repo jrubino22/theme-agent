@@ -34,7 +34,7 @@ def run_playwright_verify(
     if design_dir:
         cmd += ["--design-dir", design_dir]
 
-    res = run_allowed(cmd, cwd=theme_root, allowed_prefixes=allowed_cmds, timeout_sec=timeout_sec)
+    res = run_allowed(cmd, cwd="/app/agent/verify", allowed_prefixes=allowed_cmds, timeout_sec=timeout_sec)
     (artifacts_dir / "playwright_stdout.txt").write_text(res.stdout, encoding="utf-8")
     (artifacts_dir / "playwright_stderr.txt").write_text(res.stderr, encoding="utf-8")
 
